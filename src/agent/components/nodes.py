@@ -717,12 +717,18 @@ async def consent_check_node(state: OpeyGraphState, config: RunnableConfig):
             if cached:
                 expires_at = cached.get("expires_at")
                 cache_valid = False
+                # Always bound reuse by our own conservative TTL measured from
+                # when we cached the JWT. The `exp` claim is decoded but not
+                # cryptographically verified here, so an over-long/spoofed `exp`
+                # must not be able to extend reuse beyond this safety window.
+                within_fallback_ttl = (now - cached.get("created_at", 0)) < CONSENT_JWT_FALLBACK_TTL_SECONDS
                 if expires_at:
-                    # Use the JWT's real expiry (decoded `exp` claim) with a 60s margin.
-                    cache_valid = expires_at > now + 60
+                    # Use the JWT's real expiry (decoded `exp` claim) with a 60s
+                    # margin, capped by the fallback TTL.
+                    cache_valid = (expires_at > now + 60) and within_fallback_ttl
                 else:
                     # JWT exp unknown — fall back to a conservative safety TTL.
-                    cache_valid = (now - cached.get("created_at", 0)) < CONSENT_JWT_FALLBACK_TTL_SECONDS
+                    cache_valid = within_fallback_ttl
                 if cache_valid:
                     consent_jwt = cached.get("jwt")
                     used_cached_jwt = True

@@ -86,16 +86,18 @@ def get_user_id_from_request(request: Request) -> str:
     """
     if hasattr(request.state, "session_data"):
         session_data = request.state.session_data
-        
+
         if session_data and hasattr(session_data, 'user_id') and session_data.user_id:
             logger.debug(f"Rate limiting by user_id: {session_data.user_id}")
             return f"user:{session_data.user_id}"
         else:
-            # Has session but no user_id - anonymous session
-            logger.debug("Rate limiting anonymous session")
-            return "anonymous"
+            # Has session but no user_id - anonymous session. Key by client IP so
+            # anonymous users don't all share (and exhaust) one global bucket.
+            logger.debug("Rate limiting anonymous session by IP")
+            return f"anon-ip:{get_remote_address(request)}"
     else:
-        # No session at all - likely hitting an exempt endpoint or initial request
-        logger.debug("No session data for rate limiting - using default key")
-        return "unauthenticated"
+        # No session at all - likely hitting an exempt endpoint or initial
+        # request. Key by client IP for the same reason.
+        logger.debug("No session data for rate limiting - keying by IP")
+        return f"ip:{get_remote_address(request)}"
         

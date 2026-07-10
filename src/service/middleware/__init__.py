@@ -51,16 +51,29 @@ def setup_middleware(
     # Add error handling middleware to format authentication errors for Portal
     app.add_middleware(ErrorHandlingMiddleware)
 
-    # Setup CORS policy
+    # Setup CORS policy.
+    # A wildcard origin combined with allow_credentials=True would let any site
+    # make credentialed (cookie-bearing) cross-origin requests. Browsers reject
+    # the literal combination, but some proxies "helpfully" reflect it — so fail
+    # closed here: if "*" is configured we drop credentials rather than risk it.
+    allow_credentials = True
+    if "*" in cors_allowed_origins:
+        logger.error(
+            "CORS misconfiguration: wildcard origin '*' is incompatible with "
+            "credentialed requests. Disabling allow_credentials. Set "
+            "CORS_ALLOWED_ORIGINS to an explicit allowlist."
+        )
+        allow_credentials = False
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=cors_allowed_origins,
-        allow_credentials=True,
+        allow_credentials=allow_credentials,
         allow_methods=cors_allowed_methods,
         allow_headers=cors_allowed_headers,
     )
-    
-    logger.info(f"CORS configured with origins: {cors_allowed_origins}")
+
+    logger.info(f"CORS configured with origins: {cors_allowed_origins} (allow_credentials={allow_credentials})")
 
     # Add CORS debugging middleware for development (optional)
     if os.getenv("DEBUG_CORS", "false").lower() == "true":

@@ -17,7 +17,10 @@ from langchain_core.runnables.graph import MermaidDrawMethod
 
 
 import os
+import hashlib
 import logging
+
+from langchain_core.tools import BaseTool, StructuredTool
 
 # Configure logging
 logging.basicConfig(
@@ -25,6 +28,77 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger('opey.session')
+
+# HTTP methods considered read-only. In SAFE mode any tool call carrying a
+# `method` argument outside this set is refused before it reaches the OBP-API.
+_READ_ONLY_HTTP_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+
+def compute_thread_namespace(session_id) -> str:
+    """Per-session, non-reversible namespace derived from the session id.
+
+    Pure function so control endpoints (e.g. stream stop) can confine a
+    thread_id using only the session cookie, without building the agent graph.
+    """
+    return hashlib.sha256(str(session_id).encode()).hexdigest()[:16]
+
+
+def compute_effective_thread_id(session_id, client_thread_id: str | None) -> str:
+    """Map a client-supplied thread_id into a session's private namespace.
+
+    Idempotent: an already-namespaced id is returned unchanged. A thread_id
+    belonging to another session cannot be reached because the caller cannot
+    reproduce that session's namespace prefix.
+    """
+    prefix = f"{compute_thread_namespace(session_id)}::"
+    if not client_thread_id:
+        return f"{prefix}default"
+    if client_thread_id.startswith(prefix):
+        return client_thread_id
+    return f"{prefix}{client_thread_id}"
+
+
+def _make_readonly_tool(tool: BaseTool) -> BaseTool:
+    """Wrap a tool so that, in SAFE mode, any call with a non-read HTTP method
+    is refused at execution time instead of hitting the OBP-API.
+
+    This is a hard, server-side gate for the generic `obp_requests(method, path, …)`
+    style tool where the model supplies an arbitrary HTTP method. Tools that do
+    not accept a `method` argument are returned unchanged (there is nothing to
+    gate on generically); per-endpoint write tools, if any are exposed by the
+    MCP server, must still be gated server-side by that server.
+    """
+    try:
+        arg_names = set((getattr(tool, "args", None) or {}).keys())
+    except Exception:
+        arg_names = set()
+
+    if "method" not in arg_names:
+        return tool
+
+    original = tool
+
+    async def _guarded(**kwargs):
+        method = kwargs.get("method")
+        if method and str(method).strip().upper() not in _READ_ONLY_HTTP_METHODS:
+            logger.warning(
+                f"SAFE mode blocked non-read tool call: {original.name} "
+                f"method={method} path={kwargs.get('path')}"
+            )
+            return (
+                f"BLOCKED: '{method}' requests are not permitted in SAFE (read-only) mode. "
+                f"Only GET/read operations are allowed. Do not retry this write operation; "
+                f"tell the user it is not available in read-only mode."
+            )
+        return await original.ainvoke(kwargs)
+
+    return StructuredTool(
+        name=original.name,
+        description=original.description,
+        args_schema=original.args_schema,
+        coroutine=_guarded,
+        metadata=getattr(original, "metadata", None),
+    )
 
 class OpeySession:
     """
@@ -111,6 +185,14 @@ class OpeySession:
         
         if not tools:
             logger.warning("No MCP tools available - agent will have limited capabilities")
+
+        # SAFE mode is read-only: hard-gate every method-bearing tool so a
+        # non-GET call is refused before it reaches the OBP-API, regardless of
+        # what the prompt or MCP server does. Applies to explicit SAFE and to
+        # anonymous sessions (which are force-downgraded to SAFE above).
+        if self._obp_api_mode == "SAFE":
+            tools = [_make_readonly_tool(t) for t in tools]
+            logger.info("SAFE mode: applied read-only gate to method-bearing tools")
 
         # Store tools for consent retry (tools_by_name in config)
         self._tools = tools
@@ -230,6 +312,25 @@ class OpeySession:
         logger.info(f"Using model: {model_name}")
         self._model_name = model_name
 
+    def effective_thread_id(self, client_thread_id: str | None) -> str:
+        """Map a client-supplied thread_id into this session's private namespace.
+
+        Idempotent: an already-namespaced id is returned unchanged, so the value
+        handed back to the client (via X-Thread-ID) can be sent straight back on
+        the next request without being double-prefixed. A thread_id belonging to
+        another session cannot be reached because the caller cannot reproduce
+        that session's namespace prefix.
+        """
+        return compute_effective_thread_id(self.session_id, client_thread_id)
+
+    def enforce_limits(self) -> None:
+        """Enforce anonymous-session usage limits, raising HTTP 429 if exceeded.
+
+        Must be called before doing work on behalf of an anonymous session so a
+        client cannot bypass token/request caps by never triggering a check.
+        """
+        usage_tracker.check_limits(self.session_data)
+
     def build_config(self, base_config: dict | None = None) -> dict:
         """
         Build a complete RunnableConfig by merging base session config with runtime config.
@@ -261,6 +362,14 @@ class OpeySession:
             **session_configurable,
             **base_config.get("configurable", {})
         }
+
+        # Enforce session-private thread namespacing at the single chokepoint every
+        # route funnels through. Even if a caller passes a raw or foreign thread_id,
+        # the checkpointer key is confined to this session's namespace.
+        if "thread_id" in merged_configurable:
+            merged_configurable["thread_id"] = self.effective_thread_id(
+                merged_configurable["thread_id"]
+            )
 
         # LangGraph caps graph execution at `recursion_limit` super-steps (default 25).
         # Opey's tool-call cycle is ~5 super-steps per round, so 25 gives ~5 tool

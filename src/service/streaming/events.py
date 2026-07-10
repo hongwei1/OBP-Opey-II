@@ -101,7 +101,21 @@ class ErrorEvent(BaseStreamEvent):
     details: Optional[Dict[str, Any]] = Field(default=None, description="Additional error details")
 
     def to_sse_data(self) -> str:
-        return f"data: {self.model_dump_json()}\n\n"
+        try:
+            return f"data: {self.model_dump_json()}\n\n"
+        except Exception:
+            # `details` can carry arbitrary objects (e.g. an exception instance)
+            # that pydantic can't serialize. A raised error here would abort the
+            # whole SSE stream, so fall back to a details-free error event rather
+            # than let the connection die silently.
+            logger.warning("ErrorEvent serialization failed; emitting details-free fallback", exc_info=True)
+            safe = ErrorEvent(
+                error_message=self.error_message,
+                for_message_id=self.for_message_id,
+                error_code=self.error_code,
+                details=None,
+            )
+            return f"data: {safe.model_dump_json()}\n\n"
 
 
 class KeepAliveEvent(BaseStreamEvent):

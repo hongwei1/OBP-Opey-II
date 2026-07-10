@@ -9,9 +9,10 @@ class RequestResponseLoggingMiddleware(BaseHTTPMiddleware):
     """Middleware to log all requests and responses for debugging authentication issues"""
 
     async def dispatch(self, request: Request, call_next):
-        # Log incoming request details
+        # Log incoming request details. Never log header VALUES — Authorization,
+        # Consent-Id and Cookie carry credentials. Names only.
         logger.debug(f"REQUEST_DEBUG: {request.method} {request.url}")
-        logger.debug(f"REQUEST_DEBUG: Headers: {dict(request.headers)}")
+        logger.debug(f"REQUEST_DEBUG: Header names: {list(request.headers.keys())}")
 
         # Check for session cookie specifically
         session_cookie_value = request.cookies.get("session")
@@ -22,9 +23,10 @@ class RequestResponseLoggingMiddleware(BaseHTTPMiddleware):
         try:
             response = await call_next(request)
 
-            # Log response details
+            # Log response details. Response headers may include Set-Cookie
+            # (the session id), so log names only.
             logger.debug(f"RESPONSE_DEBUG: Status {response.status_code}")
-            logger.debug(f"RESPONSE_DEBUG: Headers: {dict(response.headers)}")
+            logger.debug(f"RESPONSE_DEBUG: Header names: {list(response.headers.keys())}")
 
             # For error responses, try to log the body
             if response.status_code >= 400:

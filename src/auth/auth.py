@@ -127,9 +127,7 @@ class OBPConsentAuth(BaseAuth):
         async with client.get(self.current_user_url, headers=headers) as response:
             if response.status == 200:
                 response_data = await response.json()
-                logger.info(f'OBP consent check successful: {response_data}')
-                logger.debug(f"OBP consent validation successful - Response headers: {dict(response.headers)}")
-                logger.debug(f"OBP consent validation successful - Full response: {response_data}")
+                logger.info(f'OBP consent check successful for user: {response_data.get("user_id", "unknown")}')
                 return True
             else:
                 error_text = await response.read()
@@ -190,7 +188,7 @@ class OBPConsentAuth(BaseAuth):
         async with client.get(self.current_user_url, headers=headers) as response:
             if response.status == 200:
                 response_data = await response.json()
-                logger.info(f'Current user retrieved successfully: {response_data}')
+                logger.info(f'Current user retrieved successfully: {response_data.get("user_id", "unknown")}')
                 return response_data
             else:
                 error_text = await response.read()
@@ -266,7 +264,7 @@ class OBPBearerAuth(BaseAuth):
         async with client.get(self.current_user_url, headers=headers) as response:
             if response.status == 200:
                 response_data = await response.json()
-                logger.info(f'Current user retrieved successfully via bearer token: {response_data}')
+                logger.info(f'Current user retrieved successfully via bearer token: {response_data.get("user_id", "unknown")}')
                 return response_data
             else:
                 error_text = await response.read()
@@ -390,7 +388,6 @@ class OBPDirectLoginAuth(BaseAuth):
             if response.status == 200:
                 response_data = await response.json()
                 logger.info(f'DirectLogin check successful for user: {response_data.get("user_id", "unknown")}')
-                logger.debug(f"DirectLogin validation successful - Full response: {response_data}")
                 return True
             else:
                 error_text = await response.text()
@@ -427,7 +424,7 @@ class OBPDirectLoginAuth(BaseAuth):
         async with client.get(current_user_url, headers=headers) as response:
             if response.status == 200:
                 response_data = await response.json()
-                logger.info(f'Current user data retrieved successfully: {response_data}')
+                logger.info(f'Current user data retrieved successfully: {response_data.get("user_id", "unknown")}')
                 return response_data
             else:
                 error_text = await response.text()
