@@ -1,0 +1,51 @@
+name: tests
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # pyproject pins python = "3.12.7" exactly, so match that patch release.
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.7"
+
+      - name: Install Poetry
+        run: pipx install poetry
+
+      - name: Cache Poetry virtualenv
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pypoetry
+          key: poetry-${{ runner.os }}-${{ hashFiles('poetry.lock') }}
+
+      - name: Install dependencies
+        # --no-root: the project uses a src/ layout (pythonpath = "src") and is
+        # not installed as a package.
+        run: poetry install --no-interaction --no-root
+
+      - name: Install test-only plugins
+        # pytest-asyncio is imported unconditionally by test/conftest.py but is
+        # not declared in poetry.lock. Install it into the Poetry venv here (so
+        # collection succeeds) rather than editing pyproject.toml, which would
+        # invalidate the committed lock.
+        run: poetry run pip install "pytest-asyncio>=0.23"
+
+      - name: Run unit tests
+        # Self-contained, synchronous unit tests that do not require a live
+        # OBP-API or Redis. Async suites (e.g. test_cancellation_manager) and
+        # integration tests (auth, redis backend, session management, approval)
+        # need pytest-asyncio mode alignment and/or live services; add them
+        # under a separate job once that is wired up.
+        run: >-
+          poetry run pytest -q
+          test/service/test_orchestrator_repository.py
+          test/service/test_thread_namespacing.py
+          test/service/test_checkpointer_guard.py
