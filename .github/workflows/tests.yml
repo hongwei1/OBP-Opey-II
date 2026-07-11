@@ -44,6 +44,10 @@ jobs:
         # integration tests (auth, session management, approval) need
         # pytest-asyncio mode alignment and/or live services; add them under a
         # separate job once that is wired up.
+        # SESSION_SECRET_KEY is read at import time by auth.session.config; a
+        # throwaway value is enough for collection/import in tests.
+        env:
+          SESSION_SECRET_KEY: ci-tests-not-a-real-secret
         run: >-
           poetry run pytest -q
           test/service/test_orchestrator_repository.py
@@ -88,6 +92,8 @@ jobs:
       - name: Run integration tests (Redis-backed)
         # Exercises RedisBackend end to end against the Redis service container.
         # Tests skip (not fail) if Redis is unreachable, so the job stays honest.
+        # SESSION_SECRET_KEY is read at import time by auth.session.config.
         env:
           REDIS_URL: redis://localhost:6379
+          SESSION_SECRET_KEY: ci-tests-not-a-real-secret
         run: poetry run pytest -q test/integration
