@@ -41,11 +41,53 @@ jobs:
       - name: Run unit tests
         # Self-contained, synchronous unit tests that do not require a live
         # OBP-API or Redis. Async suites (e.g. test_cancellation_manager) and
-        # integration tests (auth, redis backend, session management, approval)
-        # need pytest-asyncio mode alignment and/or live services; add them
-        # under a separate job once that is wired up.
+        # integration tests (auth, session management, approval) need
+        # pytest-asyncio mode alignment and/or live services; add them under a
+        # separate job once that is wired up.
         run: >-
           poetry run pytest -q
           test/service/test_orchestrator_repository.py
           test/service/test_thread_namespacing.py
           test/service/test_checkpointer_guard.py
+
+  integration-tests:
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.7"
+
+      - name: Install Poetry
+        run: pipx install poetry
+
+      - name: Cache Poetry virtualenv
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pypoetry
+          key: poetry-${{ runner.os }}-${{ hashFiles('poetry.lock') }}
+
+      - name: Install dependencies
+        run: poetry install --no-interaction --no-root
+
+      - name: Install test-only plugins
+        run: poetry run pip install "pytest-asyncio>=0.23"
+
+      - name: Run integration tests (Redis-backed)
+        # Exercises RedisBackend end to end against the Redis service container.
+        # Tests skip (not fail) if Redis is unreachable, so the job stays honest.
+        env:
+          REDIS_URL: redis://localhost:6379
+        run: poetry run pytest -q test/integration
