@@ -43,7 +43,8 @@ async def create_session(
     allow_anonymous = os.getenv("ALLOW_ANONYMOUS_SESSIONS", "false").lower() == "true"
 
     logger.info(f"CREATE SESSION REQUEST - Bearer present: {bool(bearer_token)}, Consent-Id present: {bool(consent_id)}, Anonymous allowed: {allow_anonymous}")
-    logger.debug(f"create_session - Request headers: {dict(request.headers)}")
+    # Log only header names — values (Authorization/Consent-Id) are secrets.
+    logger.debug(f"create_session - Request header names: {list(request.headers.keys())}")
 
     if bearer_token:
         # PRIMARY: Validate bearer token against OBP
@@ -166,7 +167,8 @@ async def upgrade_session(
         raise HTTPException(status_code=400, detail="Missing Consent-Id header")
 
    
-    if not await auth_config.auth_strategies["obp_consent_id"].acheck_auth(consent_id):
+    consent_auth = auth_config.auth_strategies["obp_consent_id"]
+    if not await consent_auth.acheck_auth(consent_id):
         raise HTTPException(status_code=401, detail="Invalid Consent-Id")
 
     # Get current session data
@@ -178,6 +180,13 @@ async def upgrade_session(
     if not session_data.is_anonymous:
         raise HTTPException(status_code=400, detail="Session is already authenticated")
 
+    # Resolve the user identity so the upgraded session is keyed to a real user
+    # (rate limiting and usage tracking both rely on user_id being populated).
+    user_data = await consent_auth.get_current_user(consent_id)
+    user_id = user_data.get("user_id") if user_data else None
+    if not user_id:
+        raise HTTPException(status_code=403, detail="Could not retrieve user information from Consent-Id")
+
     # Extract bearer token (new or preserve existing)
     bearer_token = _extract_bearer_token(request) or session_data.bearer_token
 
@@ -187,6 +196,7 @@ async def upgrade_session(
         is_anonymous=False,
         token_usage=session_data.token_usage,  # Preserve usage stats
         request_count=session_data.request_count,
+        user_id=user_id,
         bearer_token=bearer_token,
     )
 

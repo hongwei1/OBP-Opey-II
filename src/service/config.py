@@ -65,7 +65,11 @@ def setup_rate_limiting(app: FastAPI) -> None:
     limiter = create_limiter(key_func=get_user_id_from_request)
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-    app.add_exception_handler(ValueError, _rate_limit_exceeded_handler)
+    # NOTE: We deliberately do NOT register a global ValueError handler here.
+    # Doing so masks every ValueError raised anywhere in the app as a 429
+    # "rate limit exceeded", hiding real bugs. Rate-limit backend errors are
+    # already handled where they originate (create_limiter falls back to
+    # in-memory storage on init failure).
     logger.info("Rate limiting configured")
 
 

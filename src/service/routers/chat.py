@@ -45,12 +45,19 @@ async def invoke(user_input: UserInput, request: Request, opey_session: Annotate
 
     logger.info(f"Hello from invoke\n")
 
+    # Enforce anonymous usage limits before doing any work
+    opey_session.enforce_limits()
 
     # Update request count for usage tracking
     opey_session.update_request_count()
 
     agent: CompiledStateGraph = opey_session.graph
     kwargs, run_id = _parse_input(user_input, str(opey_session.session_id))
+    # Confine the thread to this session's private namespace (prevents a client
+    # from reading/continuing another session's thread via a guessed thread_id).
+    kwargs["config"]["configurable"]["thread_id"] = opey_session.effective_thread_id(
+        user_input.thread_id
+    )
     try:
         response = await agent.ainvoke(**kwargs)
         output = ChatMessage.from_langchain(response["messages"][-1])
@@ -62,9 +69,11 @@ async def invoke(user_input: UserInput, request: Request, opey_session: Annotate
 
         output.run_id = str(run_id)
         return output
+    except HTTPException:
+        raise
     except Exception as e:
-        logging.error(f"Error invoking agent: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logging.error(f"Error invoking agent: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal error while processing the request.")
     
     
 @router.post("/stream", response_class=StreamingResponse, responses=_sse_response_example())
@@ -74,15 +83,18 @@ async def stream_agent(
     stream_manager: StreamManager = Depends(get_stream_manager)
 ) -> StreamingResponse:
     """Stream the agent's response to a user input"""
-    # Log successful authentication
-    logger.error(f"STREAM_ENDPOINT_DEBUG: Successfully authenticated, session_id: {stream_manager.opey_session.session_id}")
-    logger.error(f"STREAM_ENDPOINT_DEBUG: User input: {user_input}")
+    logger.debug(f"stream: authenticated session_id={stream_manager.opey_session.session_id}")
+
+    # Enforce anonymous usage limits before doing any work
+    stream_manager.opey_session.enforce_limits()
 
     # Update request count for usage tracking
     stream_manager.opey_session.update_request_count()
 
-    # Get the actual thread_id that will be used
-    thread_id = user_input.thread_id or str(stream_manager.opey_session.session_id)
+    # Resolve the thread_id into this session's private namespace. Both the
+    # checkpointer config and the cancellation manager must use this value so a
+    # client can neither read nor cancel another session's thread.
+    thread_id = stream_manager.opey_session.effective_thread_id(user_input.thread_id)
     
     # Build config with model context merged in
     config = stream_manager.opey_session.build_config({
@@ -116,6 +128,14 @@ async def stream_agent(
             # Handle generator being closed gracefully
             logger.info(f"Stream generator closed for thread {thread_id}")
             raise  # Re-raise to properly close the generator
+        except Exception as e:
+            # Never let an unexpected error tear down the SSE stream without a
+            # final, client-safe event (details stay server-side).
+            logger.error(f"Unhandled error in stream for thread {thread_id}: {e}", exc_info=True)
+            try:
+                yield 'data: {"type": "error", "error_message": "Streaming failed unexpectedly.", "for_message_id": null}\n\n'
+            except Exception:
+                pass
         finally:
             # Clear cancellation flag after handling
             await cancellation_manager.clear_cancellation(thread_id)
@@ -125,23 +145,32 @@ async def stream_agent(
 
     return StreamingResponse(stream_generator(), media_type="text/event-stream", headers=headers)
 
-@router.post("/stream/{thread_id}/stop", dependencies=[Depends(session_cookie)])
-async def stop_stream(thread_id: str) -> dict:
+@router.post("/stream/{thread_id}/stop")
+async def stop_stream(
+    thread_id: str,
+    session_id: uuid.UUID = Depends(session_cookie),
+) -> dict:
     """
     Request cancellation of an active stream.
-    
+
     This signals to the streaming endpoint that the user wants to stop
     receiving tokens. The graph execution will cooperatively cancel when
     nodes check the cancellation flag.
-    
+
     Note: This is cooperative cancellation - the actual stop may not be
     immediate as it depends on when the next cancellation check occurs.
+
+    Confining the thread_id to the caller's session (via the cookie alone, no
+    graph build) ensures a client cannot cancel another session's active stream
+    by guessing its thread_id.
     """
     from utils.cancellation_manager import cancellation_manager
-    
-    logger.info(f"Stop requested for thread: {thread_id}")
-    await cancellation_manager.request_cancellation(thread_id)
-    
+    from ..opey_session import compute_effective_thread_id
+
+    effective_thread_id = compute_effective_thread_id(session_id, thread_id)
+    logger.info(f"Stop requested for thread: {effective_thread_id}")
+    await cancellation_manager.request_cancellation(effective_thread_id)
+
     return {
         "status": "cancellation_requested",
         "thread_id": thread_id,
@@ -179,8 +208,13 @@ async def regenerate_from_message(
     Returns:
         StreamingResponse with SSE events
     """
+    # Confine to the caller's session namespace before touching any thread state.
+    thread_id = stream_manager.opey_session.effective_thread_id(thread_id)
     logger.info(f"Regenerate requested for thread: {thread_id}, from message: {message_id}")
-    
+
+    # Enforce anonymous usage limits before doing any work
+    stream_manager.opey_session.enforce_limits()
+
     # Get the graph from the session
     agent = stream_manager.opey_session.graph
     
@@ -286,6 +320,12 @@ async def regenerate_from_message(
             except GeneratorExit:
                 logger.info(f"Regenerate stream generator closed for thread {thread_id}")
                 raise
+            except Exception as e:
+                logger.error(f"Unhandled error in regenerate stream for thread {thread_id}: {e}", exc_info=True)
+                try:
+                    yield 'data: {"type": "error", "error_message": "Streaming failed unexpectedly.", "for_message_id": null}\n\n'
+                except Exception:
+                    pass
             finally:
                 await cancellation_manager.clear_cancellation(thread_id)
         
@@ -302,7 +342,7 @@ async def regenerate_from_message(
         logger.error(f"Error during regenerate for thread {thread_id}: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to regenerate response: {str(e)}"
+            detail="Failed to regenerate response."
         )
         
         
@@ -313,6 +353,10 @@ async def user_approval(
     stream_manager: StreamManager = Depends(get_stream_manager)
 ) -> StreamingResponse:
     logger.info(f"[DEBUG] Approval endpoint user_response: {user_approval_response}\n")
+
+    # Confine to the caller's session namespace so an approval can only resume
+    # the caller's own interrupted thread.
+    thread_id = stream_manager.opey_session.effective_thread_id(thread_id)
 
     # Create stream input for approval continuation
     approval_user_input = StreamInput(
@@ -329,11 +373,20 @@ async def user_approval(
     })
 
     async def stream_generator():
-        async for stream_event in stream_manager.stream_response(
-            stream_input=approval_user_input,
-            config=config,
-        ):
-            yield stream_manager.to_sse_format(stream_event)
+        try:
+            async for stream_event in stream_manager.stream_response(
+                stream_input=approval_user_input,
+                config=config,
+            ):
+                yield stream_manager.to_sse_format(stream_event)
+        except GeneratorExit:
+            raise
+        except Exception as e:
+            logger.error(f"Unhandled error in approval stream for thread {thread_id}: {e}", exc_info=True)
+            try:
+                yield 'data: {"type": "error", "error_message": "Streaming failed unexpectedly.", "for_message_id": null}\n\n'
+            except Exception:
+                pass
 
     return StreamingResponse(stream_generator(), media_type="text/event-stream")
 
@@ -361,8 +414,11 @@ async def get_thread_messages(
     Returns:
         Dictionary containing thread_id and list of messages with their metadata
     """
+    # Confine to the caller's session namespace so a client can only read its
+    # own thread history, never another session's by guessing the thread_id.
+    thread_id = stream_manager.opey_session.effective_thread_id(thread_id)
     logger.info(f"Fetching message history for thread: {thread_id}")
-    
+
     # Get the graph from the session
     agent = stream_manager.opey_session.graph
     
@@ -424,5 +480,5 @@ async def get_thread_messages(
         logger.error(f"Error retrieving thread messages for {thread_id}: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to retrieve thread messages: {str(e)}"
+            detail="Failed to retrieve thread messages."
         )
