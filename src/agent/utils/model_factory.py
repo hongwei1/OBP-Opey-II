@@ -100,10 +100,21 @@ MODEL_CONFIGS = {
     
     # Ollama models (no API key required)
     "llama3.1": ModelConfig(
-        "llama3.1", 
+        "llama3.1",
         LLMProviders.OLLAMA,
         context_window=128000,
         default_max_tokens=4096
+    ),
+
+    # Local model served via an OpenAI-compatible endpoint (llama.cpp server).
+    # No real API key needed; api_key_env just needs to be set to any non-empty value.
+    "local-llama": ModelConfig(
+        "qwen2.5-3b",
+        LLMProviders.OPENAI,
+        api_key_env="LOCAL_LLM_API_KEY",
+        base_url_env="LOCAL_LLM_BASE_URL",
+        context_window=8192,
+        default_max_tokens=2048
     ),
 }
 
@@ -251,6 +262,7 @@ class ModelFactory:
             return ChatOpenAI(
                 model=config.model_id,
                 api_key=os.getenv(config.api_key_env),
+                base_url=os.getenv(config.base_url_env) if config.base_url_env else None,
                 max_tokens=kwargs.get("max_tokens", config.default_max_tokens),
                 **model_kwargs
             )

@@ -7,6 +7,7 @@ from ..opey_session import OpeySession
 from langgraph.graph.state import CompiledStateGraph
 from ..dependencies import get_stream_manager, get_opey_session
 from ..streaming import StreamManager
+from ..streaming_legacy import _parse_input
 
 import logging
 import uuid
